@@ -1,7 +1,7 @@
 "use client"
 
 import type React from "react"
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
@@ -36,8 +36,10 @@ export default function ChatBee() {
     partnerName: null,
   })
   const [onlineUsers, setOnlineUsers] = useState(0)
-  const eventSourceRef = useRef<EventSource | null>(null)
+  const [connectionError, setConnectionError] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const pollingIntervalRef = useRef<NodeJS.Timeout>()
+  const lastEventIdRef = useRef("0")
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -51,7 +53,7 @@ export default function ChatBee() {
     return Math.random().toString(36).substring(2) + Date.now().toString(36)
   }
 
-  const addMessage = (text: string, sender: "me" | "stranger" | "system", senderName?: string) => {
+  const addMessage = useCallback((text: string, sender: "me" | "stranger" | "system", senderName?: string) => {
     const message: Message = {
       id: Date.now().toString() + Math.random(),
       text,
@@ -60,14 +62,18 @@ export default function ChatBee() {
       senderName,
     }
     setMessages((prev) => [...prev, message])
-  }
+  }, [])
 
   const connectToChat = async () => {
     const sessionId = generateSessionId()
     setConnectionStatus("connecting")
     setMessages([])
+    setConnectionError(null)
+    lastEventIdRef.current = "0"
 
     try {
+      console.log("Attempting to join chat...")
+
       // Join the chat queue
       const response = await fetch("/api/chat/join", {
         method: "POST",
@@ -75,7 +81,12 @@ export default function ChatBee() {
         body: JSON.stringify({ sessionId }),
       })
 
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
       const data = await response.json()
+      console.log("Join response:", data)
 
       if (data.success) {
         setChatState({
@@ -88,77 +99,112 @@ export default function ChatBee() {
         setConnectionStatus("waiting")
         addMessage(`You are now ${data.userName}. Looking for someone to chat with...`, "system")
 
-        // Start listening for events
-        startEventSource(sessionId)
+        // Start polling for events
+        startPolling(sessionId)
+      } else {
+        throw new Error(data.error || "Failed to join chat")
       }
     } catch (error) {
       console.error("Failed to connect:", error)
       setConnectionStatus("disconnected")
+      setConnectionError(error instanceof Error ? error.message : "Connection failed")
       addMessage("Failed to connect. Please try again.", "system")
     }
   }
 
-  const startEventSource = (sessionId: string) => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close()
-    }
-
-    const eventSource = new EventSource(`/api/chat/events?sessionId=${sessionId}`)
-    eventSourceRef.current = eventSource
-
-    eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-
-      switch (data.type) {
-        case "matched":
-          setConnectionStatus("connected")
-          setChatState((prev) => ({
-            ...prev,
-            partnerId: data.partnerId,
-            partnerName: data.partnerName,
-          }))
-          addMessage(`Connected with ${data.partnerName}! Say hello!`, "system")
-          break
-
-        case "message":
-          addMessage(data.message, "stranger", data.senderName)
-          break
-
-        case "partner_disconnected":
-          setConnectionStatus("waiting")
-          setChatState((prev) => ({
-            ...prev,
-            partnerId: null,
-            partnerName: null,
-          }))
-          addMessage(`${data.partnerName} has disconnected. Looking for someone new...`, "system")
-          break
-
-        case "user_count":
-          setOnlineUsers(data.count)
-          break
-
-        case "error":
-          addMessage(data.message, "system")
-          break
+  const startPolling = useCallback(
+    (sessionId: string) => {
+      // Clear any existing polling
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current)
       }
-    }
 
-    eventSource.onerror = () => {
-      console.error("EventSource failed")
-      eventSource.close()
-    }
-  }
+      const pollEvents = async () => {
+        try {
+          const response = await fetch(`/api/chat/events?sessionId=${sessionId}&lastEventId=${lastEventIdRef.current}`)
+
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`)
+          }
+
+          const data = await response.json()
+
+          if (data.success && data.events.length > 0) {
+            // Process events
+            for (const event of data.events) {
+              lastEventIdRef.current = event.id
+
+              switch (event.type) {
+                case "connected":
+                  console.log("Connected to chat system")
+                  setConnectionError(null)
+                  break
+
+                case "matched":
+                  console.log("Matched with partner:", event.data.partnerName)
+                  setConnectionStatus("connected")
+                  setChatState((prev) => ({
+                    ...prev,
+                    partnerId: event.data.partnerId,
+                    partnerName: event.data.partnerName,
+                  }))
+                  addMessage(`Connected with ${event.data.partnerName}! Say hello!`, "system")
+                  break
+
+                case "message":
+                  console.log("Received message from partner")
+                  addMessage(event.data.message, "stranger", event.data.senderName)
+                  break
+
+                case "partner_disconnected":
+                  console.log("Partner disconnected")
+                  setConnectionStatus("waiting")
+                  setChatState((prev) => ({
+                    ...prev,
+                    partnerId: null,
+                    partnerName: null,
+                  }))
+                  addMessage(`${event.data.partnerName} has disconnected. Looking for someone new...`, "system")
+                  break
+
+                case "user_count":
+                  setOnlineUsers(event.data.count)
+                  break
+
+                case "error":
+                  console.error("Server error:", event.data.message)
+                  addMessage(event.data.message, "system")
+                  break
+
+                default:
+                  console.log("Unknown event type:", event.type)
+              }
+            }
+          }
+        } catch (error) {
+          console.error("Polling error:", error)
+          setConnectionError("Connection error. Retrying...")
+        }
+      }
+
+      // Poll every 1 second
+      pollingIntervalRef.current = setInterval(pollEvents, 1000)
+
+      // Initial poll
+      pollEvents()
+    },
+    [addMessage],
+  )
 
   const sendMessage = async () => {
-    if (!inputMessage.trim() || connectionStatus !== "connected" || !chatState.partnerId) return
+    if (!inputMessage.trim() || !chatState.partnerId) return
 
     const messageText = inputMessage.trim()
     addMessage(messageText, "me", chatState.myName)
     setInputMessage("")
 
     try {
-      await fetch("/api/chat/message", {
+      const response = await fetch("/api/chat/message", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -168,8 +214,15 @@ export default function ChatBee() {
           senderName: chatState.myName,
         }),
       })
+
+      const result = await response.json()
+      if (!result.success) {
+        console.error("Failed to send message:", result.error)
+        addMessage("Failed to send message. Please try again.", "system")
+      }
     } catch (error) {
       console.error("Failed to send message:", error)
+      addMessage("Failed to send message. Please try again.", "system")
     }
   }
 
@@ -203,6 +256,11 @@ export default function ChatBee() {
   }
 
   const endChat = async () => {
+    // Clear polling
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current)
+    }
+
     if (chatState.sessionId) {
       try {
         await fetch("/api/chat/leave", {
@@ -215,11 +273,8 @@ export default function ChatBee() {
       }
     }
 
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close()
-    }
-
     setConnectionStatus("disconnected")
+    setConnectionError(null)
     setMessages([])
     setChatState({
       sessionId: "",
@@ -227,12 +282,13 @@ export default function ChatBee() {
       myName: "",
       partnerName: null,
     })
+    lastEventIdRef.current = "0"
   }
 
   useEffect(() => {
     return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close()
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current)
       }
     }
   }, [])
@@ -272,8 +328,37 @@ export default function ChatBee() {
             <h1 className="text-3xl font-bold text-purple-900">ChatBee</h1>
           </div>
           <p className="text-purple-700">Connect with strangers anonymously</p>
-          {onlineUsers > 0 && <p className="text-sm text-purple-600 mt-1">{onlineUsers} users online</p>}
         </div>
+
+        {/* Connection Error Alert */}
+        {connectionError && (
+          <Card className="mb-4 bg-red-50 border-red-200">
+            <div className="p-3 text-center">
+              <p className="text-sm text-red-700">{connectionError}</p>
+            </div>
+          </Card>
+        )}
+
+        {/* Online Users Box */}
+        {onlineUsers > 0 && (
+          <Card className="mb-4 bg-white shadow-md border border-purple-200">
+            <div className="p-3 text-center">
+              <div className="flex items-center justify-center gap-2">
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                <span className="text-sm font-medium text-purple-700">
+                  {onlineUsers} {onlineUsers === 1 ? "user" : "users"} online
+                </span>
+              </div>
+              <p className="text-xs text-purple-600 mt-1">
+                {connectionStatus === "waiting"
+                  ? "Looking for someone to chat with..."
+                  : connectionStatus === "connected"
+                    ? "You're chatting now!"
+                    : "Click Start Chat to begin"}
+              </p>
+            </div>
+          </Card>
+        )}
 
         {/* Main Chat Interface */}
         <Card className="bg-white shadow-xl border-0 overflow-hidden">
@@ -344,13 +429,19 @@ export default function ChatBee() {
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
                   onKeyPress={handleKeyPress}
-                  placeholder={connectionStatus === "connected" ? "Type your message..." : "Waiting for connection..."}
-                  disabled={connectionStatus !== "connected"}
+                  placeholder={
+                    chatState.partnerId
+                      ? "Type your message..."
+                      : connectionStatus === "waiting"
+                        ? "Waiting for someone to connect..."
+                        : "Connecting..."
+                  }
+                  disabled={!chatState.partnerId}
                   className="flex-1"
                 />
                 <Button
                   onClick={sendMessage}
-                  disabled={!inputMessage.trim() || connectionStatus !== "connected"}
+                  disabled={!inputMessage.trim() || !chatState.partnerId}
                   className="bg-purple-600 hover:bg-purple-700"
                 >
                   <Send className="w-4 h-4" />
@@ -361,7 +452,7 @@ export default function ChatBee() {
               <div className="flex gap-2 justify-center">
                 <Button
                   onClick={nextChat}
-                  disabled={connectionStatus !== "connected"}
+                  disabled={!chatState.partnerId}
                   variant="outline"
                   size="sm"
                   className="border-purple-200 text-purple-600 hover:bg-purple-50"

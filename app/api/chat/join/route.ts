@@ -1,9 +1,23 @@
 import { type NextRequest, NextResponse } from "next/server"
+import { addEventForSession, clearEventsForSession } from "../events/route"
 
-// In-memory storage for active users and chat pairs
-const activeUsers = new Map<string, { sessionId: string; name: string; partnerId?: string }>()
-const waitingQueue: string[] = []
-const chatPairs = new Map<string, string>() // sessionId -> partnerId
+// Declare global types
+declare global {
+  var activeUsers: Map<string, { sessionId: string; name: string; partnerId?: string; lastSeen: number }> | undefined
+  var waitingQueue: string[] | undefined
+  var chatPairs: Map<string, string> | undefined
+}
+
+// Initialize global variables
+if (!globalThis.activeUsers) {
+  globalThis.activeUsers = new Map()
+}
+if (!globalThis.waitingQueue) {
+  globalThis.waitingQueue = []
+}
+if (!globalThis.chatPairs) {
+  globalThis.chatPairs = new Map()
+}
 
 // Generate random anonymous names
 const adjectives = [
@@ -59,6 +73,21 @@ function generateRandomName(): string {
   return `${adjective}${animal}${number}`
 }
 
+// Cleanup stale users every 30 seconds
+function cleanupStaleUsers() {
+  const now = Date.now()
+  const staleThreshold = 60000 // 60 seconds
+  const activeUsers = globalThis.activeUsers!
+
+  for (const [sessionId, user] of activeUsers.entries()) {
+    if (now - user.lastSeen > staleThreshold) {
+      cleanupUser(sessionId)
+    }
+  }
+}
+
+setInterval(cleanupStaleUsers, 30000)
+
 export async function POST(request: NextRequest) {
   try {
     const { sessionId } = await request.json()
@@ -68,9 +97,17 @@ export async function POST(request: NextRequest) {
     }
 
     const userName = generateRandomName()
+    const now = Date.now()
 
-    // Add user to active users
-    activeUsers.set(sessionId, { sessionId, name: userName })
+    const activeUsers = globalThis.activeUsers!
+    const waitingQueue = globalThis.waitingQueue!
+    const chatPairs = globalThis.chatPairs!
+
+    // Add user to active users with timestamp
+    activeUsers.set(sessionId, { sessionId, name: userName, lastSeen: now })
+
+    // Send initial event
+    addEventForSession(sessionId, "connected", { sessionId, userName })
 
     // Try to match with someone from the waiting queue
     if (waitingQueue.length > 0) {
@@ -82,26 +119,28 @@ export async function POST(request: NextRequest) {
         chatPairs.set(sessionId, partnerId)
         chatPairs.set(partnerId, sessionId)
 
-        // Update user records
-        activeUsers.set(sessionId, { ...activeUsers.get(sessionId)!, partnerId })
-        activeUsers.set(partnerId, { ...partner, partnerId: sessionId })
+        // Update user records with partner info
+        activeUsers.set(sessionId, {
+          sessionId,
+          name: userName,
+          partnerId,
+          lastSeen: now,
+        })
+        activeUsers.set(partnerId, {
+          ...partner,
+          partnerId: sessionId,
+          lastSeen: now,
+        })
 
         // Notify both users about the match
-        global.eventStreams?.get(sessionId)?.write(
-          `data: ${JSON.stringify({
-            type: "matched",
-            partnerId,
-            partnerName: partner.name,
-          })}\n\n`,
-        )
-
-        global.eventStreams?.get(partnerId)?.write(
-          `data: ${JSON.stringify({
-            type: "matched",
-            partnerId: sessionId,
-            partnerName: userName,
-          })}\n\n`,
-        )
+        addEventForSession(sessionId, "matched", {
+          partnerId,
+          partnerName: partner.name,
+        })
+        addEventForSession(partnerId, "matched", {
+          partnerId: sessionId,
+          partnerName: userName,
+        })
       }
     } else {
       // Add to waiting queue
@@ -115,6 +154,7 @@ export async function POST(request: NextRequest) {
       success: true,
       userName,
       waitingInQueue: waitingQueue.length,
+      totalUsers: activeUsers.size,
     })
   } catch (error) {
     console.error("Join chat error:", error)
@@ -123,21 +163,21 @@ export async function POST(request: NextRequest) {
 }
 
 function broadcastUserCount() {
+  const activeUsers = globalThis.activeUsers!
   const count = activeUsers.size
-  if (global.eventStreams) {
-    for (const stream of global.eventStreams.values()) {
-      stream.write(
-        `data: ${JSON.stringify({
-          type: "user_count",
-          count,
-        })}\n\n`,
-      )
-    }
+
+  // Send user count to all active sessions
+  for (const [sessionId] of activeUsers.entries()) {
+    addEventForSession(sessionId, "user_count", { count })
   }
 }
 
 // Cleanup function for disconnected users
 export function cleanupUser(sessionId: string) {
+  const activeUsers = globalThis.activeUsers!
+  const waitingQueue = globalThis.waitingQueue!
+  const chatPairs = globalThis.chatPairs!
+
   const user = activeUsers.get(sessionId)
   if (!user) return
 
@@ -154,12 +194,9 @@ export function cleanupUser(sessionId: string) {
 
     if (partner) {
       // Notify partner about disconnection
-      global.eventStreams?.get(partnerId)?.write(
-        `data: ${JSON.stringify({
-          type: "partner_disconnected",
-          partnerName: user.name,
-        })}\n\n`,
-      )
+      addEventForSession(partnerId, "partner_disconnected", {
+        partnerName: user.name,
+      })
 
       // Remove partner relationship
       activeUsers.set(partnerId, { ...partner, partnerId: undefined })
@@ -174,5 +211,9 @@ export function cleanupUser(sessionId: string) {
 
   // Remove user
   activeUsers.delete(sessionId)
+
+  // Clear events for this session
+  clearEventsForSession(sessionId)
+
   broadcastUserCount()
 }

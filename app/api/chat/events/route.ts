@@ -1,71 +1,62 @@
-import type { NextRequest } from "next/server"
+import { type NextRequest, NextResponse } from "next/server"
 
-// Global event streams storage
-declare global {
-  var eventStreams: Map<string, WritableStreamDefaultWriter> | undefined
-}
-
-if (!global.eventStreams) {
-  global.eventStreams = new Map()
-}
-
+// Simple polling endpoint instead of SSE
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const sessionId = searchParams.get("sessionId")
+  const lastEventId = searchParams.get("lastEventId") || "0"
 
   if (!sessionId) {
-    return new Response("Session ID required", { status: 400 })
+    return NextResponse.json({ error: "Session ID required" }, { status: 400 })
   }
 
-  const stream = new ReadableStream({
-    start(controller) {
-      const encoder = new TextEncoder()
+  try {
+    // Get events for this session
+    const events = getEventsForSession(sessionId, lastEventId)
 
-      // Store the writer for this session
-      const writer = controller
-      global.eventStreams!.set(sessionId, {
-        write: (data: string) => {
-          try {
-            controller.enqueue(encoder.encode(data))
-          } catch (error) {
-            console.error("Stream write error:", error)
-          }
-        },
-      } as any)
+    return NextResponse.json({
+      success: true,
+      events,
+      timestamp: Date.now(),
+    })
+  } catch (error) {
+    console.error("Events API error:", error)
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
+  }
+}
 
-      // Send initial connection message
-      controller.enqueue(
-        encoder.encode(
-          `data: ${JSON.stringify({
-            type: "connected",
-            sessionId,
-          })}\n\n`,
-        ),
-      )
+// Store events in memory (in production, you'd use Redis or similar)
+const sessionEvents = new Map<string, Array<{ id: string; type: string; data: any; timestamp: number }>>()
 
-      // Handle cleanup when stream closes
-      request.signal.addEventListener("abort", () => {
-        global.eventStreams!.delete(sessionId)
-        // Import and call cleanup function
-        import("../join/route").then(({ cleanupUser }) => {
-          cleanupUser(sessionId)
-        })
-        try {
-          controller.close()
-        } catch (error) {
-          // Stream already closed
-        }
-      })
-    },
+export function addEventForSession(sessionId: string, type: string, data: any) {
+  if (!sessionEvents.has(sessionId)) {
+    sessionEvents.set(sessionId, [])
+  }
+
+  const events = sessionEvents.get(sessionId)!
+  const eventId = Date.now().toString() + Math.random().toString(36).substring(2)
+
+  events.push({
+    id: eventId,
+    type,
+    data,
+    timestamp: Date.now(),
   })
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Cache-Control",
-    },
-  })
+  // Keep only last 50 events per session
+  if (events.length > 50) {
+    events.splice(0, events.length - 50)
+  }
+}
+
+function getEventsForSession(sessionId: string, lastEventId: string) {
+  const events = sessionEvents.get(sessionId) || []
+  const lastId = Number.parseInt(lastEventId) || 0
+
+  // Return events newer than lastEventId
+  return events.filter((event) => Number.parseInt(event.id) > lastId)
+}
+
+export function clearEventsForSession(sessionId: string) {
+  sessionEvents.delete(sessionId)
 }
