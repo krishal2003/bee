@@ -258,29 +258,59 @@ export default function ChatBee() {
   )
 
   const sendMessage = async () => {
-    if (!inputMessage.trim() || !chatState.partnerId || connectionStatus !== "connected") return
+    if (!inputMessage.trim() || !chatState.partnerId || connectionStatus !== "connected") {
+      console.log("Cannot send message:", {
+        hasMessage: !!inputMessage.trim(),
+        hasPartner: !!chatState.partnerId,
+        status: connectionStatus,
+      })
+      return
+    }
 
     const messageText = inputMessage.trim()
+    console.log("Sending message:", {
+      text: messageText,
+      partnerId: chatState.partnerId,
+      senderName: chatState.myName,
+      senderGender: chatState.myGender,
+    })
+
     addMessage(messageText, "me", chatState.myName, chatState.myGender || undefined)
     setInputMessage("")
 
     try {
+      const payload = {
+        sessionId: chatState.sessionId,
+        partnerId: chatState.partnerId,
+        message: messageText,
+        senderName: chatState.myName,
+        senderGender: chatState.myGender,
+      }
+
+      console.log("Sending payload:", payload)
+
       const response = await fetch("/api/chat/message", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: chatState.sessionId,
-          partnerId: chatState.partnerId,
-          message: messageText,
-          senderName: chatState.myName,
-          senderGender: chatState.myGender,
-        }),
+        body: JSON.stringify(payload),
       })
 
+      console.log("Response status:", response.status)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error("HTTP error:", response.status, errorText)
+        throw new Error(`HTTP ${response.status}: ${errorText}`)
+      }
+
       const result = await response.json()
+      console.log("Message result:", result)
+
       if (!result.success) {
         console.error("Failed to send message:", result.error)
-        addMessage("Failed to send message. Please try again.", "system")
+        addMessage(`Failed to send: ${result.error}`, "system")
+      } else {
+        console.log("✅ Message sent successfully")
       }
     } catch (error) {
       console.error("Failed to send message:", error)

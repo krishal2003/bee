@@ -18,6 +18,13 @@ export async function GET(request: NextRequest) {
     // Get events for this session
     const events = getEventsForSession(sessionId, lastEventId)
 
+    if (events.length > 0) {
+      console.log(
+        `📨 Returning ${events.length} events for ${sessionId}:`,
+        events.map((e) => e.type),
+      )
+    }
+
     return NextResponse.json({
       success: true,
       events,
@@ -47,7 +54,7 @@ export function addEventForSession(sessionId: string, type: string, data: any) {
     timestamp: Date.now(),
   })
 
-  console.log(`Added event for ${sessionId}: ${type}`)
+  console.log(`📨 Added event for ${sessionId}: ${type}`, data)
 
   // Keep only last 100 events per session
   if (events.length > 100) {
@@ -77,5 +84,5 @@ function getEventsForSession(sessionId: string, lastEventId: string) {
 
 export function clearEventsForSession(sessionId: string) {
   sessionEvents.delete(sessionId)
-  console.log(`Cleared events for session: ${sessionId}`)
+  console.log(`🗑️ Cleared events for session: ${sessionId}`)
 }
