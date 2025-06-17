@@ -1,4 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server"
+import { cleanupUser } from "../join/route"
 
 export async function POST(request: NextRequest) {
   try {
@@ -8,12 +9,26 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: "Session ID required" })
     }
 
-    // Import and call cleanup function
-    const { cleanupUser } = await import("../join/route")
-    cleanupUser(sessionId)
+    console.log(`User leaving chat: ${sessionId}`)
 
-    // Close the event stream
-    global.eventStreams?.delete(sessionId)
+    // Get user info before cleanup
+    const activeUsers = globalThis.activeUsers
+    const user = activeUsers?.get(sessionId)
+
+    if (user && user.partnerId) {
+      const partnerId = user.partnerId
+      const partner = activeUsers?.get(partnerId)
+
+      if (partner) {
+        console.log(`Ending chat for both users: ${user.name} and ${partner.name}`)
+
+        // Import and call cleanup function which will handle partner notification
+        cleanupUser(sessionId)
+      }
+    } else {
+      // No partner, just cleanup this user
+      cleanupUser(sessionId)
+    }
 
     return NextResponse.json({ success: true })
   } catch (error) {

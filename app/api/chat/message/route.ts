@@ -1,9 +1,10 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { addEventForSession } from "../events/route"
+import { updateUserActivity } from "../join/route"
 
 export async function POST(request: NextRequest) {
   try {
-    const { sessionId, partnerId, message, senderName } = await request.json()
+    const { sessionId, partnerId, message, senderName, senderGender } = await request.json()
 
     if (!sessionId || !partnerId || !message) {
       return NextResponse.json({ success: false, error: "Missing required fields" })
@@ -18,17 +19,31 @@ export async function POST(request: NextRequest) {
     const sender = activeUsers.get(sessionId)
     const partner = activeUsers.get(partnerId)
 
-    if (!sender || !partner) {
-      return NextResponse.json({ success: false, error: "User not found or disconnected" })
+    if (!sender) {
+      return NextResponse.json({ success: false, error: "Sender not found" })
     }
 
-    // Update last seen timestamp for sender
-    activeUsers.set(sessionId, { ...sender, lastSeen: Date.now() })
+    if (!partner) {
+      return NextResponse.json({ success: false, error: "Partner not found or disconnected" })
+    }
+
+    // Verify they are actually paired
+    if (sender.partnerId !== partnerId || partner.partnerId !== sessionId) {
+      return NextResponse.json({ success: false, error: "Users are not paired" })
+    }
+
+    console.log(
+      `Message from ${senderName} (${senderGender}) to ${partner.name} (${partner.gender}): ${message.substring(0, 50)}...`,
+    )
+
+    // Update sender's last seen timestamp
+    updateUserActivity(sessionId)
 
     // Send message to partner via events
     addEventForSession(partnerId, "message", {
       message: message.trim(),
       senderName,
+      senderGender,
       timestamp: Date.now(),
     })
 

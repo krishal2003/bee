@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Send, Users, SkipForward, X, MessageCircle, User } from "lucide-react"
+import { Send, Users, SkipForward, X, MessageCircle, User, Heart, Sparkles } from "lucide-react"
 
 interface Message {
   id: string
@@ -14,18 +14,24 @@ interface Message {
   sender: "me" | "stranger" | "system"
   timestamp: number
   senderName?: string
+  senderGender?: "male" | "female"
 }
 
 type ConnectionStatus = "disconnected" | "connecting" | "waiting" | "connected"
+type Gender = "male" | "female"
 
 interface ChatState {
   sessionId: string
   partnerId: string | null
   myName: string
+  myGender: Gender | null
   partnerName: string | null
+  partnerGender: Gender | null
 }
 
 export default function ChatBee() {
+  const [showGenderSelection, setShowGenderSelection] = useState(true)
+  const [selectedGender, setSelectedGender] = useState<Gender | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [inputMessage, setInputMessage] = useState("")
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("disconnected")
@@ -33,13 +39,16 @@ export default function ChatBee() {
     sessionId: "",
     partnerId: null,
     myName: "",
+    myGender: null,
     partnerName: null,
+    partnerGender: null,
   })
   const [onlineUsers, setOnlineUsers] = useState(0)
   const [connectionError, setConnectionError] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const pollingIntervalRef = useRef<NodeJS.Timeout>()
   const lastEventIdRef = useRef("0")
+  const isActiveRef = useRef(true)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -53,23 +62,48 @@ export default function ChatBee() {
     return Math.random().toString(36).substring(2) + Date.now().toString(36)
   }
 
-  const addMessage = useCallback((text: string, sender: "me" | "stranger" | "system", senderName?: string) => {
-    const message: Message = {
-      id: Date.now().toString() + Math.random(),
-      text,
-      sender,
-      timestamp: Date.now(),
-      senderName,
-    }
-    setMessages((prev) => [...prev, message])
-  }, [])
+  const getGenderColor = (gender: Gender | null) => {
+    if (gender === "male") return "text-blue-600"
+    if (gender === "female") return "text-pink-600"
+    return "text-gray-600"
+  }
+
+  const getGenderBadgeColor = (gender: Gender | null) => {
+    if (gender === "male") return "bg-blue-100 text-blue-800 border-blue-200"
+    if (gender === "female") return "bg-pink-100 text-pink-800 border-pink-200"
+    return "bg-gray-100 text-gray-800 border-gray-200"
+  }
+
+  const addMessage = useCallback(
+    (text: string, sender: "me" | "stranger" | "system", senderName?: string, senderGender?: Gender) => {
+      const message: Message = {
+        id: Date.now().toString() + Math.random(),
+        text,
+        sender,
+        timestamp: Date.now(),
+        senderName,
+        senderGender,
+      }
+      setMessages((prev) => [...prev, message])
+    },
+    [],
+  )
+
+  const handleGenderSelection = (gender: Gender) => {
+    setSelectedGender(gender)
+    setShowGenderSelection(false)
+    setChatState((prev) => ({ ...prev, myGender: gender }))
+  }
 
   const connectToChat = async () => {
+    if (!selectedGender) return
+
     const sessionId = generateSessionId()
     setConnectionStatus("connecting")
     setMessages([])
     setConnectionError(null)
     lastEventIdRef.current = "0"
+    isActiveRef.current = true
 
     try {
       console.log("Attempting to join chat...")
@@ -78,7 +112,7 @@ export default function ChatBee() {
       const response = await fetch("/api/chat/join", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId }),
+        body: JSON.stringify({ sessionId, gender: selectedGender }),
       })
 
       if (!response.ok) {
@@ -93,7 +127,9 @@ export default function ChatBee() {
           sessionId,
           partnerId: null,
           myName: data.userName,
+          myGender: selectedGender,
           partnerName: null,
+          partnerGender: null,
         })
 
         setConnectionStatus("waiting")
@@ -120,6 +156,8 @@ export default function ChatBee() {
       }
 
       const pollEvents = async () => {
+        if (!isActiveRef.current) return
+
         try {
           const response = await fetch(`/api/chat/events?sessionId=${sessionId}&lastEventId=${lastEventIdRef.current}`)
 
@@ -147,13 +185,14 @@ export default function ChatBee() {
                     ...prev,
                     partnerId: event.data.partnerId,
                     partnerName: event.data.partnerName,
+                    partnerGender: event.data.partnerGender,
                   }))
                   addMessage(`Connected with ${event.data.partnerName}! Say hello!`, "system")
                   break
 
                 case "message":
                   console.log("Received message from partner")
-                  addMessage(event.data.message, "stranger", event.data.senderName)
+                  addMessage(event.data.message, "stranger", event.data.senderName, event.data.senderGender)
                   break
 
                 case "partner_disconnected":
@@ -163,8 +202,28 @@ export default function ChatBee() {
                     ...prev,
                     partnerId: null,
                     partnerName: null,
+                    partnerGender: null,
                   }))
                   addMessage(`${event.data.partnerName} has disconnected. Looking for someone new...`, "system")
+                  break
+
+                case "chat_ended":
+                  console.log("Chat ended by partner")
+                  setConnectionStatus("disconnected")
+                  setChatState({
+                    sessionId: "",
+                    partnerId: null,
+                    myName: "",
+                    myGender: selectedGender,
+                    partnerName: null,
+                    partnerGender: null,
+                  })
+                  addMessage(`Chat ended. ${event.data.partnerName} left the conversation.`, "system")
+                  // Stop polling
+                  if (pollingIntervalRef.current) {
+                    clearInterval(pollingIntervalRef.current)
+                  }
+                  isActiveRef.current = false
                   break
 
                 case "user_count":
@@ -183,7 +242,9 @@ export default function ChatBee() {
           }
         } catch (error) {
           console.error("Polling error:", error)
-          setConnectionError("Connection error. Retrying...")
+          if (isActiveRef.current) {
+            setConnectionError("Connection error. Retrying...")
+          }
         }
       }
 
@@ -193,14 +254,14 @@ export default function ChatBee() {
       // Initial poll
       pollEvents()
     },
-    [addMessage],
+    [addMessage, selectedGender],
   )
 
   const sendMessage = async () => {
-    if (!inputMessage.trim() || !chatState.partnerId) return
+    if (!inputMessage.trim() || !chatState.partnerId || connectionStatus !== "connected") return
 
     const messageText = inputMessage.trim()
-    addMessage(messageText, "me", chatState.myName)
+    addMessage(messageText, "me", chatState.myName, chatState.myGender || undefined)
     setInputMessage("")
 
     try {
@@ -212,6 +273,7 @@ export default function ChatBee() {
           partnerId: chatState.partnerId,
           message: messageText,
           senderName: chatState.myName,
+          senderGender: chatState.myGender,
         }),
       })
 
@@ -236,19 +298,25 @@ export default function ChatBee() {
   const nextChat = async () => {
     if (chatState.sessionId) {
       try {
-        await fetch("/api/chat/next", {
+        const response = await fetch("/api/chat/next", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId: chatState.sessionId }),
         })
 
-        setConnectionStatus("waiting")
-        setChatState((prev) => ({
-          ...prev,
-          partnerId: null,
-          partnerName: null,
-        }))
-        addMessage("Looking for someone new to chat with...", "system")
+        const data = await response.json()
+        if (data.success) {
+          setConnectionStatus("waiting")
+          setChatState((prev) => ({
+            ...prev,
+            partnerId: null,
+            partnerName: null,
+            partnerGender: null,
+            myName: data.userName || prev.myName,
+          }))
+          addMessage("Looking for someone new to chat with...", "system")
+          lastEventIdRef.current = "0"
+        }
       } catch (error) {
         console.error("Failed to find next chat:", error)
       }
@@ -256,6 +324,8 @@ export default function ChatBee() {
   }
 
   const endChat = async () => {
+    isActiveRef.current = false
+
     // Clear polling
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current)
@@ -280,13 +350,22 @@ export default function ChatBee() {
       sessionId: "",
       partnerId: null,
       myName: "",
+      myGender: selectedGender,
       partnerName: null,
+      partnerGender: null,
     })
     lastEventIdRef.current = "0"
   }
 
+  const resetToGenderSelection = () => {
+    endChat()
+    setShowGenderSelection(true)
+    setSelectedGender(null)
+  }
+
   useEffect(() => {
     return () => {
+      isActiveRef.current = false
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current)
       }
@@ -318,6 +397,86 @@ export default function ChatBee() {
     }
   }
 
+  // Gender Selection Screen
+  if (showGenderSelection) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-50 via-pink-50 to-blue-50 p-4 flex items-center justify-center">
+        <Card className="w-full max-w-md bg-white/80 backdrop-blur-sm shadow-2xl border-0 overflow-hidden">
+          <div className="p-8 text-center">
+            {/* Header */}
+            <div className="mb-8">
+              <div className="flex items-center justify-center gap-3 mb-4">
+                <div className="relative">
+                  <MessageCircle className="w-12 h-12 text-purple-600" />
+                  <Sparkles className="w-4 h-4 text-pink-500 absolute -top-1 -right-1" />
+                </div>
+                <h1 className="text-4xl font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent">
+                  ChatBee
+                </h1>
+              </div>
+              <p className="text-gray-600 text-lg">Connect with strangers anonymously</p>
+              <div className="flex items-center justify-center gap-1 mt-2">
+                <Heart className="w-4 h-4 text-red-400" />
+                <span className="text-sm text-gray-500">Choose your identity</span>
+                <Heart className="w-4 h-4 text-red-400" />
+              </div>
+            </div>
+
+            {/* Gender Selection */}
+            <div className="space-y-4 mb-8">
+              <h2 className="text-xl font-semibold text-gray-800 mb-6">I am a...</h2>
+
+              <div className="grid grid-cols-2 gap-4">
+                {/* Male Option */}
+                <button
+                  onClick={() => handleGenderSelection("male")}
+                  className="group relative p-6 rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-blue-100 hover:from-blue-100 hover:to-blue-200 transition-all duration-300 hover:scale-105 hover:shadow-lg"
+                >
+                  <div className="text-center">
+                    <div className="w-16 h-16 mx-auto mb-3 rounded-full bg-blue-500 flex items-center justify-center text-white text-2xl font-bold group-hover:bg-blue-600 transition-colors">
+                      ♂
+                    </div>
+                    <h3 className="text-lg font-semibold text-blue-700 group-hover:text-blue-800">Male</h3>
+                    <p className="text-sm text-blue-600 mt-1">Your name will appear in blue</p>
+                  </div>
+                  <div className="absolute inset-0 rounded-2xl bg-blue-400/20 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                </button>
+
+                {/* Female Option */}
+                <button
+                  onClick={() => handleGenderSelection("female")}
+                  className="group relative p-6 rounded-2xl border-2 border-pink-200 bg-gradient-to-br from-pink-50 to-pink-100 hover:from-pink-100 hover:to-pink-200 transition-all duration-300 hover:scale-105 hover:shadow-lg"
+                >
+                  <div className="text-center">
+                    <div className="w-16 h-16 mx-auto mb-3 rounded-full bg-pink-500 flex items-center justify-center text-white text-2xl font-bold group-hover:bg-pink-600 transition-colors">
+                      ♀
+                    </div>
+                    <h3 className="text-lg font-semibold text-pink-700 group-hover:text-pink-800">Female</h3>
+                    <p className="text-sm text-pink-600 mt-1">Your name will appear in pink</p>
+                  </div>
+                  <div className="absolute inset-0 rounded-2xl bg-pink-400/20 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                </button>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="text-center">
+              <p className="text-xs text-gray-500 mb-2">This helps personalize your chat experience</p>
+              <div className="flex items-center justify-center gap-2 text-xs text-gray-400">
+                <span>Safe</span>
+                <span>•</span>
+                <span>Anonymous</span>
+                <span>•</span>
+                <span>Fun</span>
+              </div>
+            </div>
+          </div>
+        </Card>
+      </div>
+    )
+  }
+
+  // Main Chat Interface
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-50 to-purple-100 p-4">
       <div className="max-w-4xl mx-auto">
@@ -326,8 +485,17 @@ export default function ChatBee() {
           <div className="flex items-center justify-center gap-2 mb-2">
             <MessageCircle className="w-8 h-8 text-purple-600" />
             <h1 className="text-3xl font-bold text-purple-900">ChatBee</h1>
+            <Badge className={`ml-2 ${getGenderBadgeColor(chatState.myGender)}`}>
+              {chatState.myGender === "male" ? "♂ Male" : "♀ Female"}
+            </Badge>
           </div>
           <p className="text-purple-700">Connect with strangers anonymously</p>
+          <button
+            onClick={resetToGenderSelection}
+            className="text-xs text-purple-600 hover:text-purple-800 underline mt-1"
+          >
+            Change gender
+          </button>
         </div>
 
         {/* Connection Error Alert */}
@@ -367,6 +535,11 @@ export default function ChatBee() {
             <div className="flex items-center gap-2">
               <Users className="w-5 h-5" />
               <span className="font-medium">{chatState.myName ? `You are ${chatState.myName}` : "Anonymous Chat"}</span>
+              {chatState.partnerName && chatState.partnerGender && (
+                <span className="text-sm opacity-75">
+                  • Chatting with {chatState.partnerGender === "male" ? "♂" : "♀"} {chatState.partnerName}
+                </span>
+              )}
             </div>
             {getStatusBadge()}
           </div>
@@ -409,7 +582,13 @@ export default function ChatBee() {
                       {message.sender !== "system" && message.senderName && (
                         <div className="flex items-center gap-1 mb-1">
                           <User className="w-3 h-3" />
-                          <span className="text-xs opacity-75">{message.senderName}</span>
+                          <span
+                            className={`text-xs font-medium ${
+                              message.sender === "me" ? "text-white/75" : getGenderColor(message.senderGender || null)
+                            }`}
+                          >
+                            {message.senderGender === "male" ? "♂" : "♀"} {message.senderName}
+                          </span>
                         </div>
                       )}
                       <p className="text-sm">{message.text}</p>
@@ -430,18 +609,18 @@ export default function ChatBee() {
                   onChange={(e) => setInputMessage(e.target.value)}
                   onKeyPress={handleKeyPress}
                   placeholder={
-                    chatState.partnerId
+                    connectionStatus === "connected"
                       ? "Type your message..."
                       : connectionStatus === "waiting"
                         ? "Waiting for someone to connect..."
                         : "Connecting..."
                   }
-                  disabled={!chatState.partnerId}
+                  disabled={connectionStatus !== "connected"}
                   className="flex-1"
                 />
                 <Button
                   onClick={sendMessage}
-                  disabled={!inputMessage.trim() || !chatState.partnerId}
+                  disabled={!inputMessage.trim() || connectionStatus !== "connected"}
                   className="bg-purple-600 hover:bg-purple-700"
                 >
                   <Send className="w-4 h-4" />
@@ -452,7 +631,7 @@ export default function ChatBee() {
               <div className="flex gap-2 justify-center">
                 <Button
                   onClick={nextChat}
-                  disabled={!chatState.partnerId}
+                  disabled={connectionStatus !== "connected"}
                   variant="outline"
                   size="sm"
                   className="border-purple-200 text-purple-600 hover:bg-purple-50"

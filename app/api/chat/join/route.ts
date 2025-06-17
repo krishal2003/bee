@@ -3,7 +3,9 @@ import { addEventForSession, clearEventsForSession } from "../events/route"
 
 // Declare global types
 declare global {
-  var activeUsers: Map<string, { sessionId: string; name: string; partnerId?: string; lastSeen: number }> | undefined
+  var activeUsers:
+    | Map<string, { sessionId: string; name: string; gender: "male" | "female"; partnerId?: string; lastSeen: number }>
+    | undefined
   var waitingQueue: string[] | undefined
   var chatPairs: Map<string, string> | undefined
 }
@@ -20,53 +22,16 @@ if (!globalThis.chatPairs) {
 }
 
 // Generate random anonymous names
-const adjectives = [
-  "Happy",
-  "Clever",
-  "Bright",
-  "Swift",
-  "Kind",
-  "Brave",
-  "Calm",
-  "Cool",
-  "Wise",
-  "Bold",
-  "Gentle",
-  "Quick",
-  "Smart",
-  "Funny",
-  "Lucky",
-  "Sunny",
-  "Witty",
-  "Zesty",
-  "Eager",
-  "Noble",
-]
+const maleAdjectives = ["Strong", "Brave", "Cool", "Smart", "Bold", "Swift", "Wise", "Noble", "Clever", "Quick"]
+const femaleAdjectives = ["Bright", "Kind", "Gentle", "Sweet", "Lovely", "Grace", "Sunny", "Happy", "Pretty", "Witty"]
 
-const animals = [
-  "Bee",
-  "Fox",
-  "Cat",
-  "Dog",
-  "Bear",
-  "Bird",
-  "Fish",
-  "Lion",
-  "Wolf",
-  "Deer",
-  "Owl",
-  "Frog",
-  "Duck",
-  "Seal",
-  "Hawk",
-  "Dove",
-  "Swan",
-  "Crab",
-  "Moth",
-  "Wren",
-]
+const maleAnimals = ["Lion", "Wolf", "Bear", "Hawk", "Tiger", "Eagle", "Fox", "Shark", "Falcon", "Panther"]
+const femaleAnimals = ["Butterfly", "Swan", "Dove", "Cat", "Deer", "Bird", "Bee", "Owl", "Seal", "Wren"]
 
-function generateRandomName(): string {
+function generateRandomName(gender: "male" | "female"): string {
+  const adjectives = gender === "male" ? maleAdjectives : femaleAdjectives
+  const animals = gender === "male" ? maleAnimals : femaleAnimals
+
   const adjective = adjectives[Math.floor(Math.random() * adjectives.length)]
   const animal = animals[Math.floor(Math.random() * animals.length)]
   const number = Math.floor(Math.random() * 999) + 1
@@ -76,11 +41,12 @@ function generateRandomName(): string {
 // Cleanup stale users every 30 seconds
 function cleanupStaleUsers() {
   const now = Date.now()
-  const staleThreshold = 60000 // 60 seconds
+  const staleThreshold = 90000 // 90 seconds
   const activeUsers = globalThis.activeUsers!
 
   for (const [sessionId, user] of activeUsers.entries()) {
     if (now - user.lastSeen > staleThreshold) {
+      console.log(`Cleaning up stale user: ${sessionId}`)
       cleanupUser(sessionId)
     }
   }
@@ -90,31 +56,35 @@ setInterval(cleanupStaleUsers, 30000)
 
 export async function POST(request: NextRequest) {
   try {
-    const { sessionId } = await request.json()
+    const { sessionId, gender } = await request.json()
 
-    if (!sessionId) {
-      return NextResponse.json({ success: false, error: "Session ID required" })
+    if (!sessionId || !gender) {
+      return NextResponse.json({ success: false, error: "Session ID and gender required" })
     }
 
-    const userName = generateRandomName()
+    const userName = generateRandomName(gender)
     const now = Date.now()
 
     const activeUsers = globalThis.activeUsers!
     const waitingQueue = globalThis.waitingQueue!
     const chatPairs = globalThis.chatPairs!
 
-    // Add user to active users with timestamp
-    activeUsers.set(sessionId, { sessionId, name: userName, lastSeen: now })
+    console.log(`User ${userName} (${gender}, ${sessionId}) joining chat`)
+
+    // Add user to active users with timestamp and gender
+    activeUsers.set(sessionId, { sessionId, name: userName, gender, lastSeen: now })
 
     // Send initial event
-    addEventForSession(sessionId, "connected", { sessionId, userName })
+    addEventForSession(sessionId, "connected", { sessionId, userName, gender })
 
     // Try to match with someone from the waiting queue
     if (waitingQueue.length > 0) {
       const partnerId = waitingQueue.shift()!
       const partner = activeUsers.get(partnerId)
 
-      if (partner) {
+      if (partner && !partner.partnerId) {
+        console.log(`Matching ${userName} (${gender}) with ${partner.name} (${partner.gender})`)
+
         // Create chat pair
         chatPairs.set(sessionId, partnerId)
         chatPairs.set(partnerId, sessionId)
@@ -123,6 +93,7 @@ export async function POST(request: NextRequest) {
         activeUsers.set(sessionId, {
           sessionId,
           name: userName,
+          gender,
           partnerId,
           lastSeen: now,
         })
@@ -136,23 +107,33 @@ export async function POST(request: NextRequest) {
         addEventForSession(sessionId, "matched", {
           partnerId,
           partnerName: partner.name,
+          partnerGender: partner.gender,
         })
         addEventForSession(partnerId, "matched", {
           partnerId: sessionId,
           partnerName: userName,
+          partnerGender: gender,
         })
+
+        console.log(`Successfully matched ${userName} (${gender}) with ${partner.name} (${partner.gender})`)
+      } else {
+        // Partner is no longer available, add current user to queue
+        waitingQueue.push(sessionId)
+        console.log(`Partner not available, added ${userName} to queue`)
       }
     } else {
       // Add to waiting queue
       waitingQueue.push(sessionId)
+      console.log(`Added ${userName} to waiting queue`)
     }
 
     // Broadcast user count update
-    broadcastUserCount()
+    setTimeout(broadcastUserCount, 100)
 
     return NextResponse.json({
       success: true,
       userName,
+      gender,
       waitingInQueue: waitingQueue.length,
       totalUsers: activeUsers.size,
     })
@@ -181,10 +162,13 @@ export function cleanupUser(sessionId: string) {
   const user = activeUsers.get(sessionId)
   if (!user) return
 
+  console.log(`Cleaning up user: ${user.name} (${user.gender}, ${sessionId})`)
+
   // Remove from waiting queue
   const queueIndex = waitingQueue.indexOf(sessionId)
   if (queueIndex > -1) {
     waitingQueue.splice(queueIndex, 1)
+    console.log(`Removed ${user.name} from waiting queue`)
   }
 
   // Handle partner disconnection
@@ -193,17 +177,24 @@ export function cleanupUser(sessionId: string) {
     const partner = activeUsers.get(partnerId)
 
     if (partner) {
-      // Notify partner about disconnection
+      console.log(`Notifying partner ${partner.name} about disconnection`)
+
+      // Notify partner about disconnection and end their chat too
       addEventForSession(partnerId, "partner_disconnected", {
+        partnerName: user.name,
+      })
+      addEventForSession(partnerId, "chat_ended", {
+        reason: "Partner disconnected",
         partnerName: user.name,
       })
 
       // Remove partner relationship
-      activeUsers.set(partnerId, { ...partner, partnerId: undefined })
+      activeUsers.set(partnerId, { ...partner, partnerId: undefined, lastSeen: Date.now() })
       chatPairs.delete(partnerId)
 
       // Add partner back to waiting queue
       waitingQueue.push(partnerId)
+      console.log(`Added partner ${partner.name} back to waiting queue`)
     }
 
     chatPairs.delete(sessionId)
@@ -215,5 +206,18 @@ export function cleanupUser(sessionId: string) {
   // Clear events for this session
   clearEventsForSession(sessionId)
 
-  broadcastUserCount()
+  console.log(`Successfully cleaned up user: ${user.name}`)
+
+  // Broadcast updated user count
+  setTimeout(broadcastUserCount, 100)
+}
+
+// Update user activity
+export function updateUserActivity(sessionId: string) {
+  const activeUsers = globalThis.activeUsers!
+  const user = activeUsers.get(sessionId)
+
+  if (user) {
+    activeUsers.set(sessionId, { ...user, lastSeen: Date.now() })
+  }
 }

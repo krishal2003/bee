@@ -1,4 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server"
+import { updateUserActivity } from "../join/route"
 
 // Simple polling endpoint instead of SSE
 export async function GET(request: NextRequest) {
@@ -11,6 +12,9 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    // Update user activity when they poll
+    updateUserActivity(sessionId)
+
     // Get events for this session
     const events = getEventsForSession(sessionId, lastEventId)
 
@@ -43,20 +47,35 @@ export function addEventForSession(sessionId: string, type: string, data: any) {
     timestamp: Date.now(),
   })
 
-  // Keep only last 50 events per session
-  if (events.length > 50) {
-    events.splice(0, events.length - 50)
+  console.log(`Added event for ${sessionId}: ${type}`)
+
+  // Keep only last 100 events per session
+  if (events.length > 100) {
+    events.splice(0, events.length - 100)
   }
 }
 
 function getEventsForSession(sessionId: string, lastEventId: string) {
   const events = sessionEvents.get(sessionId) || []
-  const lastId = Number.parseInt(lastEventId) || 0
 
-  // Return events newer than lastEventId
-  return events.filter((event) => Number.parseInt(event.id) > lastId)
+  // If lastEventId is "0", return all events
+  if (lastEventId === "0") {
+    return events
+  }
+
+  // Find the index of the last event ID
+  const lastIndex = events.findIndex((event) => event.id === lastEventId)
+
+  if (lastIndex === -1) {
+    // If lastEventId not found, return all events (might have been cleaned up)
+    return events
+  }
+
+  // Return events after the last event ID
+  return events.slice(lastIndex + 1)
 }
 
 export function clearEventsForSession(sessionId: string) {
   sessionEvents.delete(sessionId)
+  console.log(`Cleared events for session: ${sessionId}`)
 }
